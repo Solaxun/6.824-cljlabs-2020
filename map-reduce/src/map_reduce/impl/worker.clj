@@ -23,15 +23,6 @@
     (rpc/close! client)
     response))
 
-;;; don't think I need this Worker record or constructor
-;;; worker fn already receives mapf and reduce f
-#_(defrecord Worker [mapf reducef])
-
-#_(defn new-worker
-  [mapf reducef]
-  (map->Worker {:mapf    mapf
-                :reducef reducef}))
-
 (defn write-kvs
   [output {:keys [worker-id status last-checkin job n-reduce] :as worker}]
   (doseq [{k :key v :value} output]

@@ -4,7 +4,7 @@
 
 (defn mapf
   [document contents]
-  (for [word (-> (string/split contents #"[^a-zA-Z]+")
+  (for [word (-> (re-seq #"[a-zA-Z]+" contents)
                  distinct)]
     {:key word :value (last (string/split document #"/"))}))
 
