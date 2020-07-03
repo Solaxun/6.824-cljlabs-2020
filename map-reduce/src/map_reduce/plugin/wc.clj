@@ -5,7 +5,7 @@
 
 (defn mapf
   [_ contents]
-  (for [word (string/split contents #"[^a-zA-Z]+")]
+  (for [word (re-seq  #"[a-zA-Z]+" contents)]
     {:key word :value "1"}))
 
 (defn reducef

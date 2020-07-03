@@ -42,7 +42,15 @@
     (reduce + running-list)))
 
 (defn mapf
+  "Addeded sleep to this because without it the map portion
+  completes so quickly that the first worker empties the queue
+  and completes all tasks before the second worker can get a task
+
+  This isn't an issue in the normal code because the map function
+  is processing a large text file, but here it's just processing
+  the key/value pairs below, which finish almost immediately"
   [_ _]
+  (Thread/sleep 100)
   [{:key "a" :value "1"}
    {:key "b" :value "1"}
    {:key "c" :value "1"}

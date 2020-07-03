@@ -48,19 +48,19 @@
       (let [app                    (-> (:app options)
                                        keyword)
             {:keys [mapf reducef]} (plugin/load-plugin app)
-            ;;	read each input file,
-            ;;	pass it to Map,
-            ;;	accumulate the intermediate Map output.
+            ;;  read each input file,
+            ;;  pass it to Map,
+            ;;  accumulate the intermediate Map output.
 
-            ;;	a big difference from real MapReduce is that all the
-            ;;	intermediate data is in one place, intermediate[],
-            ;;	rather than being partitioned into NxM buckets.
+            ;;  a big difference from real MapReduce is that all the
+            ;;  intermediate data is in one place, intermediate[],
+            ;;  rather than being partitioned into NxM buckets.
             intermediate (->> files
                               (map #(mapf % (slurp %)))
                               (apply concat)
                               (filter (comp (complement string/blank?) :key)))
-            ;; call Reduce on each distinct key in intermediate[],
-            ;;	and print the result to mr-out-0.
+            ;;  call Reduce on each distinct key in intermediate[],
+            ;;  and print the result to mr-out-0.
             output       (->> intermediate
                               (util/index-by :key)
                               (util/map-over-values :value)
