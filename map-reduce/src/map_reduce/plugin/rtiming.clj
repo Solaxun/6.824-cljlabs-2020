@@ -50,7 +50,7 @@
   is processing a large text file, but here it's just processing
   the key/value pairs below, which finish almost immediately"
   [_ _]
-  (Thread/sleep 100)
+  #_(Thread/sleep 100)
   [{:key "a" :value "1"}
    {:key "b" :value "1"}
    {:key "c" :value "1"}

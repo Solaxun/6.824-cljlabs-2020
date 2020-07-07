@@ -23,22 +23,21 @@
     (rpc/close! client)
     response))
 
-(defn write-kvs
+(defn write-kvs!
   [output {:keys [worker-id status last-checkin job n-reduce] :as worker}]
   (doseq [{k :key v :value} output]
-    ;; mr-n-n.txt
     (let [f (io/file output-directory
                           (str "mr-" worker-id "-" (mod (ihash k) n-reduce)))]
       (with-open [writer (io/writer f :append true)]
         (.write writer (format "%s %s\n" k v)))
-      (swap! intermediate-files conj f)))
-  (call! :Master/CompleteTask {:worker-id worker-id :task-type "map"}))
+      (swap! intermediate-files conj (.getPath f)))))
 
-(defn write-vals [worker-id reducef kv-counts]
-  (with-open [writer (io/writer (io/file output-directory (str "mr-out-" worker-id)))]
+(defn write-vals! [worker reducef kv-counts]
+  (with-open [writer (io/writer (io/file output-directory
+                                         (str "mr-out-" (:worker-id worker)))
+                                :append true)]
     (doseq [[k cnt] kv-counts]
-      (.write writer (format "%s %s\n" k (reducef k cnt)))))
-  (call! :Master/CompleteTask {:worker-id worker-id :task-type "reduce"}))
+      (.write writer (format "%s %s\n" k (reducef k cnt))))))
 
 (defn file->kvs [f]
   (->> f
@@ -48,33 +47,36 @@
               (let [[k v] (string/split kv #" ")]
                 {:key k :value (read-string v)})))))
 
-(defn reduce-stage [reducef files worker]
-  (->> files
-       ;; only process those belonging to this worker since the atom
-       ;; has results from every worker.  When running separate processes
-       ;; e.g. from terminal, this shouldn't be an issue
-       (filter #(-> % .getName
-                    (string/split #"-")
-                    second read-string
-                    (= (:worker-id worker))))
+(defn reduce-stage! [reducef worker]
+  (->> (:job worker)
        (mapcat file->kvs)
        (group-by :key)
        (map (fn [[k v]] [k (map :value v)]))
-       (write-vals (:worker-id worker) reducef)))
+       (write-vals! worker reducef)))
 
 (defn worker
   "map-reduce.worker calls this function."
   [mapf reducef]
-  (let [{id :worker-id} (call! :Master/RegisterWorker nil)]
-    (loop [{:keys [worker-id status last-checkin job] :as worker}
-           (call! :Master/GetMapTask id)]
+  (let [worker (call! :Master/RegisterWorker nil)]
+    (loop [{:keys [job stage] :as worker} (call! :Master/GetMapTask worker)]
       (println worker)
-      (if (= job :shutdown)
-        (reduce-stage reducef @intermediate-files worker)
-        (let [data (slurp job)]
-          (write-kvs (mapf job data) worker)
-          (recur (call! :Master/GetMapTask id)))))))
+      (cond (= job :mapdone)
+            ;; When no more map tasks, let master know where the worker saved it's files
+            ;; move this workers intermdiate files out of waiting and into reduce queue
+            (do (call! :Master/CompleteMapTask
+                       (assoc worker :intermediate-files @intermediate-files))
+                ;; GetReduceTask blocks until master knows all map tasks done
+                (recur (call! :Master/GetReduceTask worker)))
 
-#_(dotimes [i 6] (future (worker wc/mapf wc/reducef)))
-#_(worker wc/mapf wc/reducef)
-#_(call! :Master/CompleteTask {:worker-id :mcw :task-type "reduce"})
+            (= job :reducedone)
+            (do (call! :Master/CompleteReduceTask worker)
+                :finished)
+
+            (= stage "map")
+            (let [data (slurp job)]
+              (write-kvs! (mapf job data) worker)
+              (recur (call! :Master/GetMapTask worker)))
+
+            (= stage "reduce")
+            (do (reduce-stage! reducef worker)
+                (recur (call! :Master/GetReduceTask worker)))))))
