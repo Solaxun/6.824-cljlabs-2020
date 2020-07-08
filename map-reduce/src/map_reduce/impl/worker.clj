@@ -23,14 +23,17 @@
     (rpc/close! client)
     response))
 
+(defn hashed-filename [worker-id entry]
+  (-> entry :key ihash (mod 10) ((partial str "mr-" worker-id "-"))))
+
 (defn write-kvs!
   [output {:keys [worker-id status last-checkin job n-reduce] :as worker}]
-  (doseq [{k :key v :value} output]
-    (let [f (io/file output-directory
-                          (str "mr-" worker-id "-" (mod (ihash k) n-reduce)))]
-      (with-open [writer (io/writer f :append true)]
-        (.write writer (format "%s %s\n" k v)))
-      (swap! intermediate-files conj (.getPath f)))))
+  (let [fname->entries (->> output (group-by (partial hashed-filename worker-id)))]
+    (doseq [[fname kvpairs] fname->entries]
+      (with-open [writer (io/writer (io/file output-directory fname) :append true)]
+        (doseq [{k :key v :value} kvpairs]
+          (.write writer (format "%s %s\n" k v))))
+      (swap! intermediate-files conj (str output-directory "/" fname)))))
 
 (defn write-vals! [worker reducef kv-counts]
   (with-open [writer (io/writer (io/file output-directory
