@@ -57,26 +57,28 @@
 (defn worker
   "map-reduce.worker calls this function."
   [mapf reducef]
-  (let [worker (call! :Master/RegisterWorker nil)]
-    (loop [{:keys [job stage] :as worker} (call! :Master/GetMapTask worker)]
-      (println worker)
-      (cond (= job :mapdone)
-            ;; When no more map tasks, let master know where the worker saved it's files
-            ;; move this workers intermdiate files out of waiting and into reduce queue
-            (do (call! :Master/CompleteMapTask
-                       (assoc worker :intermediate-files @intermediate-files))
-                ;; GetReduceTask blocks until master knows all map tasks done
-                (recur (call! :Master/GetReduceTask worker)))
+  (loop [{:keys [job stage] :as worker} (call! :Master/GetMapTask nil)]
+    (println worker)
+    (cond (= job :mapdone)
+          ;; When no more map tasks, let master know where the worker saved it's files
+          ;; move this workers intermdiate files out of waiting and into reduce queue
+          (do (call! :Master/CompleteMapTask
+                     (assoc worker :intermediate-files @intermediate-files))
+              ;; GetReduceTask blocks until master knows all map tasks done
+              (recur (call! :Master/GetReduceTask worker)))
 
-            (= job :reducedone)
-            (do (call! :Master/CompleteReduceTask worker)
-                :finished)
+          (= job :reducedone)
+          (do (call! :Master/CompleteReduceTask worker)
+              :finished)
 
-            (= stage "map")
-            (let [data (slurp job)]
-              (write-kvs! (mapf job data) worker)
-              (recur (call! :Master/GetMapTask worker)))
+          (= stage "map")
+          (let [data (slurp job)]
+            (write-kvs! (mapf job data) worker)
+            (recur (call! :Master/GetMapTask worker)))
 
-            (= stage "reduce")
-            (do (reduce-stage! reducef worker)
-                (recur (call! :Master/GetReduceTask worker)))))))
+          (= stage "reduce")
+          (do (reduce-stage! reducef worker)
+              (recur (call! :Master/GetReduceTask worker)))
+
+          :else
+          (println "something went wrong: " stage " " job))))
