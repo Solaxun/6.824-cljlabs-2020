@@ -40,17 +40,19 @@
 (defn complete-map-task [state {:keys [worker-id intermediate-files]}]
   ;; TODO: if this worker was marked as failed due to a delay and then eventually
   ;; responded, need to NOT update intermediate files and NOT decrement work remaining
-  (-> state
-      (update-in [:workers worker-id] assoc
-                 :last-update (.toString (java.time.LocalDateTime/now)))
-      (update :map-jobs-remaining dec)
-      (update :intermediate-files set/union intermediate-files)))
+  (when-not (contains? (:failed-workers state) worker-id)
+    (-> state
+        (update-in [:workers worker-id] assoc
+                   :last-update (.toString (java.time.LocalDateTime/now)))
+        (update :map-jobs-remaining dec)
+        (update :intermediate-files set/union intermediate-files))))
 
 (defn complete-reduce-task [state {:keys [worker-id] :as worker}]
-  (-> state
-      (update-in [:workers worker-id] assoc
-                 :last-update (.toString (java.time.LocalDateTime/now)))
-      (update :reduce-jobs-remaining dec)))
+  (when-not (contains? (:failed-workers state) worker-id)
+    (-> state
+        (update-in [:workers worker-id] assoc
+                   :last-update (.toString (java.time.LocalDateTime/now)))
+        (update :reduce-jobs-remaining dec))))
 
 (defn ifile->reduceid [fpath]
   (last (clojure.string/split fpath #"-")))
