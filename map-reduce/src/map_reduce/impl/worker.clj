@@ -19,16 +19,21 @@
 (defn call!
   [rpc-name args]
   (let [client   (rpc/dial port)
-        response (rpc/call! client rpc-name args)]
+        response (try
+                   (rpc/call! client rpc-name args)
+                   (catch Exception e))]
     (rpc/close! client)
     response))
 
 (defn hashed-filename [worker-id entry]
   (-> entry :key ihash (mod 10) ((partial str "mr-" worker-id "-"))))
 
-(defn write-kvs!
-  [output {:keys [worker-id status last-checkin job n-reduce] :as worker}]
-  (let [fname->entries (->> output (group-by (partial hashed-filename worker-id)))]
+(defn map-stage!
+  [mapf {:keys [worker-id status last-checkin job n-reduce] :as worker}]
+  (let [fname->entries (->> (:fpath job)
+                            slurp
+                            ((partial mapf (:fpath job)))
+                            (group-by (partial hashed-filename worker-id)))]
     (doseq [[fname kvpairs] fname->entries]
       (with-open [writer (io/writer (io/file output-directory fname) :append true)]
         (doseq [{k :key v :value} kvpairs]
@@ -51,7 +56,7 @@
                 {:key k :value (read-string v)})))))
 
 (defn reduce-stage! [reducef worker]
-  (->> (:job worker)
+  (->> (get-in worker [:job :fpath])
        (mapcat file->kvs)
        (group-by :key)
        (map (fn [[k v]] [k (map :value v)]))
@@ -60,28 +65,14 @@
 (defn worker
   "map-reduce.worker calls this function."
   [mapf reducef]
-  (loop [{:keys [job stage] :as worker} (call! :Master/GetMapTask nil)]
+  (loop [{{stage :stage} :job :as worker} (call! :Master/GetTask nil)]
     (println worker)
-    (cond (= job :mapdone)
-          ;; When no more map tasks, let master know where the worker saved it's files
-          ;; move this workers intermdiate files out of waiting and into reduce queue
-          (do (call! :Master/CompleteMapTask
-                     (assoc worker :intermediate-files @intermediate-files))
-              ;; GetReduceTask blocks until master knows all map tasks done
-              (recur (call! :Master/GetReduceTask worker)))
-
-          (= job :reducedone)
-          (do (call! :Master/CompleteReduceTask worker)
-              :finished)
-
-          (= stage "map")
-          (let [data (slurp job)]
-            (write-kvs! (mapf job data) worker)
-            (recur (call! :Master/GetMapTask worker)))
-
-          (= stage "reduce")
-          (do (reduce-stage! reducef worker)
-              (recur (call! :Master/GetReduceTask worker)))
-
-          :else
-          (println "something went wrong: " stage " " job))))
+    (when worker ; assume no response means work done (master could be down though)
+      (if (= stage "map")
+        (do (map-stage! mapf worker)
+            (call! :Master/CompleteMapTask
+                   (assoc worker :intermediate-files @intermediate-files)))
+        (do (reduce-stage! reducef worker)
+            (call! :Master/CompleteReduceTask
+                   worker)))
+      (recur (call! :Master/GetTask worker)))))

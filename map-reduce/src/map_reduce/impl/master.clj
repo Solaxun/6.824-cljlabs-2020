@@ -3,14 +3,16 @@
   (:require
    [go.net :as net]
    [go.rpc :as rpc]
-   [clojure.set :as set]))
+   [clojure.set :as set])
+  (:import
+   [java.util.concurrent LinkedBlockingQueue]
+   [java.time LocalDateTime Duration]))
 
 (def port 3000)
 (def output-directory "mr-tmp")
 
 (defprotocol IMaster
-  (GetMapTask [this worker])
-  (GetReduceTask [this worker])
+  (GetTask [this worker])
   (CompleteMapTask [this worker])
   (CompleteReduceTask [this worker]))
 
@@ -19,87 +21,109 @@
         (clojure.java.io/file)
         file-seq
         (filter #(.isFile %))
-        (map #(.getPath %))))
+        (map #(hash-map :stage "map" :fpath (.getPath %)))))
 
 (defn make-worker [worker id n-reduce]
   {:worker-id id
-   :stage (:stage worker "map")
-   :last-checkin (.toString (java.time.LocalDateTime/now))
-   :job (:job worker nil)
+   :last-update (.toString (java.time.LocalDateTime/now))
+   :job (:job worker)
    :n-reduce n-reduce})
-;; if worker, only change sstage and time, return as latest worker
-(defn get-map-task [s worker n-reduce]
-  (let [id (get worker :worker-id (-> s :active-map-workers inc))
+
+(defn get-task [s worker n-reduce]
+  (let [id (:worker-id worker (-> s :worker-id inc))
         w (make-worker worker id n-reduce)]
     (-> s
+        (assoc  :worker-id id)
         (update :workers assoc id w)
-        (assoc :current-worker w)
-        (update :active-map-workers (if (some? worker) identity inc))
-        (update :active-reduce-workers (if (some? worker) identity inc)))))
+        (assoc  :newest-worker w))))
 
 (defn complete-map-task [state {:keys [worker-id intermediate-files]}]
+  ;; TODO: if this worker was marked as failed due to a delay and then eventually
+  ;; responded, need to NOT update intermediate files and NOT decrement work remaining
   (-> state
       (update-in [:workers worker-id] assoc
-                 :last-checkin (.toString (java.time.LocalDateTime/now)))
-      (update :active-map-workers dec)
+                 :last-update (.toString (java.time.LocalDateTime/now)))
+      (update :map-jobs-remaining dec)
       (update :intermediate-files set/union intermediate-files)))
 
-(defn reduce-task [state action {:keys [worker-id] :as worker}]
-  (let [rworker-update {:get-task identity :complete-task dec}
-        w (assoc worker
-                 :last-checkin (.toString (java.time.LocalDateTime/now))
-                 :stage "reduce")]
-    (-> state
-        (update :active-reduce-workers (get rworker-update action))
-        (assoc :current-worker w)
-        (assoc-in [:workers worker-id] w))))
+(defn complete-reduce-task [state {:keys [worker-id] :as worker}]
+  (-> state
+      (update-in [:workers worker-id] assoc
+                 :last-update (.toString (java.time.LocalDateTime/now)))
+      (update :reduce-jobs-remaining dec)))
 
 (defn ifile->reduceid [fpath]
   (last (clojure.string/split fpath #"-")))
 
-(defn fill-reduce-q [reduceq state]
+(defn start-reducing [tasks state-atom state-val]
   #_(println "all map jobs done, starting reduce tasks...")
-  (let [{:keys [intermediate-files active-reduce-workers]} state
-        shutdown-msgs (repeat active-reduce-workers :reducedone)]
-    (doseq [[rid files] (group-by ifile->reduceid intermediate-files)]
-      (.add reduceq files))
-    (doseq [s shutdown-msgs]
-      (.add reduceq s))))
+  (let [{:keys [intermediate-files workers]} state-val
+        reduce-jobs (group-by ifile->reduceid intermediate-files)]
+    (swap! state-atom assoc :reduce-jobs-remaining (count reduce-jobs))
+    (doseq [[rid files] reduce-jobs]
+      (.add tasks {:stage "reduce" :fpath files}))
+    ;; sometimes it seems pending takes might finish consuming all the
+    ;; reduce jobs above, resulting in a zero cnt of rjobs remaining and
+    ;; and empty queue before all of the "finished" flags below can be
+    ;; inserted.  Then some worker will try to contact the closed master
+    ;; and receive an error
+    #_(dotimes [r (count workers)]
+      (.add tasks {:stage "finished"}))))
 
 (defn map-jobs-finished? [state]
-  (zero? (:active-map-workers state)))
+  (zero? (:map-jobs-remaining state)))
 
-(defrecord Master [map-tasks reduce-tasks state n-reduce]
+(defrecord Master [tasks state n-reduce]
   IMaster
-  (GetMapTask
+  (GetTask
     [this worker]
     #_(println "["(:worker-id worker) "]" " - n mappers: " (:active-map-workers @state))
-    (when-not worker (.add map-tasks :mapdone))
-    (let [s (swap! state get-map-task worker n-reduce)
-          w (:current-worker s)]
-      (assoc w :job (.take map-tasks))))
-  (GetReduceTask
-    [this worker]
-    #_(println "["(:worker-id worker) "]" " - n reducers: " (:active-reduce-workers @state))
-    (let [s (swap! state reduce-task :get-task worker)
-          w (:current-worker s)]
-      (assoc w :job (.take reduce-tasks))))
+    (let [s (swap! state get-task worker n-reduce)
+          w (:newest-worker s)]
+      (assoc w :job (.take tasks))))
   (CompleteMapTask
     [this worker]
     (let [s (swap! state complete-map-task worker)]
       (when (map-jobs-finished? s)
-        (fill-reduce-q reduce-tasks s))))
+        (start-reducing tasks state s))))
   (CompleteReduceTask
     [this worker]
     #_(println "["(:worker-id worker) "]" " - reducer q: " (:reduce-tasks this))
-    (swap! state reduce-task :complete-task worker)))
+    (swap! state complete-reduce-task worker)))
+
+(defn datetime-str->datetime [s]
+  (java.time.LocalDateTime/parse s))
+
+(defn seconds-between [t0 t1]
+  (/ (java.time.Duration/between t0 t1)
+     1000))
+
+(defn job-stuck? [[id worker]]
+  (let [t0 (:last-update worker)]
+    (> (seconds-between t0 (java.time.LocalDateTime/now))pyt
+       9.5)))
+
+(defn update-failed-workers [state failed-workers]
+  (-> state
+      (update :failed-workers into failed-workers)
+      (update :map-jobs-remaining ?)
+      (update :reduce-jobs-remaining ?)))
+
+(defn reassign-failed-jobs [master]
+  (when-let [failed (filter job-stuck? (-> master :state deref :workers))]
+    (swap! (:state master) update-failed-workers failed)
+    (doseq [[id worker] failed]
+      (.add (:tasks master)
+            (:job worker)))))
 
 (defn master
   [tasks n-reduce]
   (->Master (java.util.concurrent.LinkedBlockingQueue. tasks)
-            (java.util.concurrent.LinkedBlockingQueue.)
-            (atom {:active-map-workers 0
-                   :active-reduce-workers 0
+            (atom {:worker-id 0
+                   :newest-worker nil
+                   :failed-workers {}
+                   :map-jobs-remaining (count tasks)
+                   :reduce-jobs-remaining nil
                    :intermediate-files #{}
                    :workers {}})
             n-reduce))
@@ -114,19 +138,14 @@
     (rpc/serve server l)
     server))
 
-(defn all-jobs-complete? [master]
-  (let [{:keys [map-tasks reduce-tasks]} master
-        {:keys [active-map-workers active-reduce-workers]} @(:state master)]
-    #_(println  active-reduce-workers " - reduce workers")
-    (and (empty? map-tasks)
-         (empty? reduce-tasks)
-         (zero? active-reduce-workers))))
-
 (defn done
   "map-reduce.master calls `done` periodically to find out
   if the entire job has finished."
   [master]
-  (all-jobs-complete? master))
+  (when-let [rjobs (-> master :state deref :reduce-jobs-remaining)]
+    #_(println rjobs (:tasks master))
+    (and (zero? rjobs)
+         (empty? (:tasks master)))))
 
 (defn make-master
   "Create a Master.
@@ -141,4 +160,13 @@
 (defn -main []
   (let [m (make-master tasks 10)]
     (while (not (done m))
+      (reassign-failed-jobs m)
       (Thread/sleep 1000))))
+
+;; if worker fails, we will have not completed task so map tasks remaining
+;; stays at the right numer.  ID could either be recycled by reducing worker-id
+;; in state map, or leaving it as "retired" and just assign new ID.  Then if worker
+;; later responds (it was delayed, not dead) we need to find a way to ignore it's
+;; intermediate work if that work was already done by another worker.  If the ID can
+;; be reused, we need to somehow know it's work is outdated e.g. timestamps.  If the ID
+;; is retired, we can just ignore all retired jobs
