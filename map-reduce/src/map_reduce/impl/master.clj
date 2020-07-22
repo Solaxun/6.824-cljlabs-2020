@@ -102,17 +102,18 @@
 
 (defn job-stuck? [[id worker]]
   (let [t0 (:last-update worker)]
-    (> (seconds-between t0 (java.time.LocalDateTime/now))pyt
+    (> (seconds-between t0 (java.time.LocalDateTime/now))
        9.5)))
 
 (defn update-failed-workers [state failed-workers]
   (-> state
       (update :failed-workers into failed-workers)
-      (update :map-jobs-remaining ?)
-      (update :reduce-jobs-remaining ?)))
+      #_(update :map-jobs-remaining ?)
+      #_(update :reduce-jobs-remaining ?)))
 
 (defn reassign-failed-jobs [master]
   (when-let [failed (filter job-stuck? (-> master :state deref :workers))]
+    (println "failure: " failed)
     (swap! (:state master) update-failed-workers failed)
     (doseq [[id worker] failed]
       (.add (:tasks master)
